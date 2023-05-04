@@ -1,0 +1,17 @@
+[package]
+name = "closur"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "closur"
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { version = "1.26.0", features = ["full"] }
+bytes = "1.4.0"
+regex = "1.7.1"
+bitflags = "2.2.1"
+
+[dev-dependencies]
+clap = { version = "4.2.7", features = ["derive"] }
