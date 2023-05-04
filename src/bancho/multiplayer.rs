@@ -25,6 +25,12 @@ pub struct Match {
 }
 
 impl Match {
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+    pub fn inner_id(&self) -> u32 {
+        self.inner_id
+    }
     pub async fn send_chat(&mut self, body: &str) -> crate::Result<()> {
         self.writer.send_chat(body).await
     }
@@ -54,7 +60,7 @@ impl Match {
     pub fn invite_link(&self, password: Option<&str>) -> String {
         format!("osump://{}/{}", self.inner_id, password.unwrap_or(""))
     }
-    pub async fn subscriber(&self) -> broadcast::Receiver<super::Event> {
+    pub fn events(&self) -> broadcast::Receiver<super::Event> {
         self.event_rx.resubscribe()
     }
     pub async fn channel_writer(&self) -> &ChannelSender {

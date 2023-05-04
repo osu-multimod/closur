@@ -339,6 +339,13 @@ impl ChannelSender {
     }
 }
 
+#[derive(Debug)]
+struct ChannelState {
+    channel: Channel,
+    topic: String,
+    tx: Option<broadcast::Sender<Event>>,
+}
+
 struct ClientActor {
     options: ClientOptions,
 
@@ -351,7 +358,7 @@ struct ClientActor {
     action_rx: mpsc::Receiver<Action>,
     event_tx: broadcast::Sender<Event>,
 
-    channels: HashMap<Channel, broadcast::Sender<Event>>,
+    channels: HashMap<Channel, ChannelState>,
 }
 
 impl ClientActor {
@@ -364,9 +371,25 @@ impl ClientActor {
             irc::Command::JOIN(channel) => {
                 if let Some(channel) = Channel::try_from(channel.as_str()).ok() {
                     self.event_tx.send(Event::Join(channel.clone()))?;
-                    // TODO: design mechanism to fetch HashMap from Client
-                    // let (tx, _) = broadcast::channel(Client::CHANNEL_BUFFER);
-                    // self.channels.insert(channel, tx);
+                    if !self.channels.contains_key(&channel) {
+                        self.channels.insert(channel.clone(), ChannelState {
+                            channel,
+                            topic: String::new(),
+                            tx: None,
+                        });
+                    }
+                }
+            }
+            irc::Command::Raw(code, params) => {
+                if code == "332" && params.len() > 2 {
+                    let channel = Channel::try_from(params[1].as_str()).ok();
+                    if let Some(channel) = channel {
+                        let topic = params[2].clone();
+                        if let Some(state) = self.channels.get_mut(&channel) {
+                            state.topic = topic;
+                        }
+                    }
+                    return Ok(())
                 }
             }
             irc::Command::PART(channel) => {
@@ -440,7 +463,11 @@ impl ClientActor {
                                         let event =
                                             Event::Multiplayer(channel.clone(), event.clone());
                                         self.event_tx.send(event.clone())?;
-                                        self.channels.get(&channel).map(|tx| tx.send(event).ok());
+                                        self.channels.get(&channel).map(|state| {
+                                            if let Some(tx) = &state.tx {
+                                                tx.send(event);
+                                            }
+                                        });
                                     }
                                     _ => {}
                                 };
@@ -459,7 +486,11 @@ impl ClientActor {
                         };
                         self.event_tx.send(event.clone())?;
                         if let Some(channel) = channel {
-                            self.channels.get(&channel).map(|tx| tx.send(event).ok());
+                            self.channels.get(&channel).map(|state| {
+                                if let Some(tx) = &state.tx {
+                                    tx.send(event);
+                                }
+                            });
                         }
                     }
                 }
@@ -469,8 +500,36 @@ impl ClientActor {
         Ok(())
     }
 
-    async fn process_action(&self, action: Action) -> crate::Result<()> {
+    async fn process_action(&mut self, action: Action) -> crate::Result<()> {
         match action {
+            Action::Channels(tx) => {
+                let channels = self
+                    .channels
+                    .iter()
+                    .map(|(channel, _)| channel.clone())
+                    .collect::<Vec<_>>();
+                tx.send(channels);
+            }
+            Action::Subscribe(channel, tx) => {
+                if let Some(state) = self.channels.get_mut(&channel) {
+                    match &state.tx {
+                        Some(event_tx) => {
+                            tx.send(Some(
+                                (state.topic.clone(), event_tx.subscribe())
+                            ));
+                        },
+                        None => {
+                            let (event_tx, rx) = broadcast::channel(Client::CHANNEL_BUFFER);
+                            tx.send(Some(
+                                (state.topic.clone(), rx)
+                            ));
+                            state.tx = Some(event_tx);
+                        }
+                    }
+                } else {
+                    tx.send(None);
+                }
+            }
             Action::BotCommand {
                 channel,
                 command,
@@ -706,9 +765,42 @@ impl Client {
         .map_err(|_| Error::OperationTimeout)?
     }
 
-    pub async fn join(&mut self, channel: &Channel) -> crate::Result<String> {
-        // TODO: check if we're already in the channel via a HashMap
+    pub async fn channels(&self) -> crate::Result<Vec<Channel>> {
+        let (tx, rx) = oneshot::channel();
+        self.action_tx.send(Action::Channels(tx)).await?;
+        Ok(rx.await?)
+    }
 
+    async fn subscribe(&self, channel: &Channel) -> crate::Result<Option<(String, broadcast::Receiver<Event>)>> {
+        let (tx, rx) = oneshot::channel();
+        self.action_tx.send(Action::Subscribe(channel.clone(), tx)).await?;
+        Ok(rx.await?)
+    }
+
+    pub async fn join_channel_room(&mut self, channel: &Channel) -> crate::Result<ChannelRoom> {
+        let entry = self.subscribe(channel).await?;
+        if entry.is_none() {
+            self.join(channel).await?;
+        }
+
+        let entry = self.subscribe(channel).await?;
+        match entry {
+            None => Err("Cannot join channel".into()),
+            Some((topic, rx)) => Ok(ChannelRoom {
+                topic,
+                writer: ChannelSender { channel: channel.clone(), writer: self.writer() },
+                event_rx: rx,
+            }),
+        }
+    }
+
+    pub async fn join_match(&mut self, id: u64) -> crate::Result<multiplayer::Match> {
+        let channel = Channel::Multiplayer(id);
+        let room = self.join_channel_room(&channel).await?;
+        Ok(room.try_into()?)
+    }
+
+    pub async fn join(&mut self, channel: &Channel) -> crate::Result<()> {
         let command = irc::Command::JOIN(channel.to_string());
         let mut rx = self.irc_rx.resubscribe();
         self.irc_tx.send(irc::Message::new(command, None)).await?;
@@ -719,7 +811,8 @@ impl Client {
                 match message.command {
                     irc::Command::Raw(code, params) => {
                         if code == "332" && params.len() > 2 && params[1] == channel.to_string() {
-                            return Ok(params[2].clone());
+                            return Ok(())
+                            
                         } else if code == "403"
                             && params.len() > 2
                             && params[1] == channel.to_string()
@@ -739,26 +832,6 @@ impl Client {
         let command = irc::Command::PART(channel.to_string());
         self.irc_tx.send(irc::Message::new(command, None)).await?;
         Ok(())
-    }
-
-    // FIXME: unstable and incomplete method
-    pub async fn join_match(&mut self, id: u64) -> crate::Result<multiplayer::Match> {
-        let channel = Channel::Multiplayer(id);
-        let topic = self.join(&channel).await?;
-
-        let (tx, rx) = broadcast::channel(Self::CHANNEL_BUFFER);
-        let mut event_rx = self.events();
-        Ok(multiplayer::Match {
-            id,
-            inner_id: topic.trim_start_matches("multiplayer game #").parse()?,
-            // TODO: creates a HashMap<Channel, broadcast::Sender<Event>> in ClientActor,
-            // so the broadcast receiver will receive events only from this channel.
-            event_rx: rx,
-            writer: ChannelSender {
-                channel: Channel::Multiplayer(id),
-                writer: self.writer(),
-            },
-        })
     }
 
     pub fn events(&self) -> broadcast::Receiver<Event> {
@@ -1062,15 +1135,20 @@ impl Event {
             _ => false,
         }
     }
+
     pub fn is_multiplayer(&self) -> bool {
         match self {
+            Event::Join(channel) => channel.is_multiplayer(),
+            Event::Part(channel) => channel.is_multiplayer(),
             Event::Message {
                 channel: Some(channel),
                 ..
             } => channel.is_multiplayer(),
+            Event::Multiplayer(..) => true,
             _ => false,
         }
     }
+
     pub fn channel(&self) -> Option<&Channel> {
         match self {
             Event::Join(channel) => Some(channel),
@@ -1078,6 +1156,10 @@ impl Event {
             Event::Message { channel, .. } => channel.as_ref(),
             Event::Multiplayer(channel, _) => Some(channel),
         }
+    }
+
+    pub fn is_from_channel(&self, channel: &Channel) -> bool {
+        self.channel() == Some(channel)
     }
 }
 
@@ -1120,7 +1202,60 @@ impl ToString for Chat {
 }
 
 #[derive(Debug)]
+pub struct ChannelRoom {
+    topic: String,
+    writer: ChannelSender,
+    event_rx: broadcast::Receiver<Event>,
+}
+
+impl ChannelRoom {
+    pub fn channel(&self) -> Channel {
+        self.writer.channel.clone()
+    }
+    pub fn topic(&self) -> &str {
+        self.topic.as_str()
+    }
+    pub fn channel_writer(&self) -> ChannelSender {
+        self.writer.clone()
+    }
+    pub async fn send_chat(&mut self, body: &str) -> crate::Result<()> {
+        self.writer.send_chat(body).await
+    }
+    pub fn events(&self) -> broadcast::Receiver<Event> {
+        self.event_rx.resubscribe()
+    }
+}
+
+impl TryInto<multiplayer::Match> for ChannelRoom {
+    type Error = ConversionError;
+    fn try_into(self) -> StdResult<multiplayer::Match, Self::Error> {
+        if !self.writer.channel.is_multiplayer() {
+            return Err(ConversionError::ChannelTypeMismatch);
+        }
+        let id = match self.writer.channel {
+            Channel::Multiplayer(id) => id,
+            _ => 0,
+        };
+        Ok(multiplayer::Match {
+            id,
+            inner_id: self.topic.trim_start_matches("multiplayer game #").parse().map_err(|_| ConversionError::InvalidMatchInnerId)?,
+            writer: self.writer,
+            event_rx: self.event_rx,
+        })
+    }
+}
+
+// impl ChannelRoom {
+//     pub fn into_match(self) -> Std::Result<Match> {
+
+//     }
+// }
+
+
+#[derive(Debug)]
 enum Action {
+    Channels(oneshot::Sender<Vec<Channel>>),
+    Subscribe(Channel, oneshot::Sender<Option<(String, broadcast::Receiver<Event>)>>),
     BotCommand {
         channel: Option<Channel>,
         command: bot::Command,
