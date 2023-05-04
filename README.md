@@ -1,5 +1,7 @@
 # closur
 
+![closur logo](./assets/logo.png)
+
 closur: osu!bancho client library for Rust
 
 ## Usage
