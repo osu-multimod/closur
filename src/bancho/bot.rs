@@ -620,6 +620,7 @@ static MESSAGE_MAP: &[(&str, &str)] = &[
         r"^Plays: *(?P<play_count>\d+) \(lv(?P<level>\d+)\)$",
     ),
     ("stats-accuracy", r"^Accuracy: +(?P<accuracy>[\d.]+)%$"),
+    ("stats-error", r"^No user specified$"),
     (
         "roll-response",
         r"^(?P<user>.+) rolls (?P<value>\d+) point\(s\)$",
