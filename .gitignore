@@ -2,5 +2,6 @@
 /samples
 /venv
 /bin
+.env*
 *.sh
-*.bak
+**/*.bak

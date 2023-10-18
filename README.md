@@ -2,7 +2,7 @@
 
 ![closur logo](./assets/logo.png)
 
-closur: osu!bancho client library for Rust
+closur: osu!bancho IRC library for Rust
 
 ## Usage
 

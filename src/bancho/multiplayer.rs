@@ -1,80 +1,213 @@
-use core::fmt;
-use tokio::sync::broadcast;
+use std::fmt;
+use std::{borrow::Borrow, str::FromStr, time::Duration};
 
-use super::{
-    bot::{self, MpSettingsResponse},
-    Channel, ChannelSender, Map, Mods, User,
-};
+use super::{bot, Channel, Map, Mods, Operator, User, UserScore};
 
-use crate::{
-    error::{ConversionError},
-    StdResult,
-};
-
-pub const MAX_SLOTS: usize = 16;
-
-pub type Slots = [Option<Slot>; MAX_SLOTS];
+use crate::{error::ConversionError, StdResult};
 
 #[derive(Debug)]
-pub struct Match {
-    pub(super) id: u64,
-    /// internal match id, appeared in invite link e.g. `osump://123456`
-    pub(super) inner_id: u32,
-    pub(super) event_rx: broadcast::Receiver<super::Event>,
-    pub(super) writer: ChannelSender,
+pub struct RangeError {
+    number: usize,
+    limit: usize,
 }
 
-impl Match {
-    pub fn id(&self) -> u64 {
+impl RangeError {
+    pub fn number(&self) -> usize {
+        self.number
+    }
+    pub fn limit(&self) -> usize {
+        self.limit
+    }
+}
+
+impl fmt::Display for RangeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "number {} is out of range 0..={}",
+            self.number, self.limit
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct SlotRanged<const MAX: usize>(u8);
+impl<const MAX: usize> SlotRanged<MAX> {
+    pub const MIN_USIZE: usize = 0;
+    pub const MAX_USIZE: usize = MAX;
+    pub const MIN: Self = Self(0);
+    pub const MAX: Self = Self(MAX as u8);
+
+    pub fn as_usize(&self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl AsRef<u8> for SlotRanged<MAX_SLOT_INDEX> {
+    fn as_ref(&self) -> &u8 {
+        &self.0
+    }
+}
+
+impl<const MAX: usize> Into<usize> for SlotRanged<MAX> {
+    fn into(self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl<const MAX: usize> From<u8> for SlotRanged<MAX> {
+    fn from(value: u8) -> Self {
+        Self(value)
+    }
+}
+
+impl<const MAX: usize> From<u32> for SlotRanged<MAX> {
+    fn from(value: u32) -> Self {
+        Self(value as u8)
+    }
+}
+
+impl<const MAX: usize> From<i32> for SlotRanged<MAX> {
+    fn from(value: i32) -> Self {
+        Self(value as u8)
+    }
+}
+
+impl<const MAX: usize> From<usize> for SlotRanged<MAX> {
+    fn from(value: usize) -> Self {
+        Self(value as u8)
+    }
+}
+
+impl<const MAX: usize> FromStr for SlotRanged<MAX> {
+    type Err = core::num::ParseIntError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let index = s.parse::<u8>()?;
+        Ok(Self(index))
+    }
+}
+
+impl<const MAX: usize> fmt::Display for SlotRanged<MAX> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0 as usize)
+    }
+}
+
+pub const MAX_SLOT_INDEX: usize = 15;
+pub const MAX_SLOT_SIZE: usize = 16;
+
+pub type SlotIndex = SlotRanged<MAX_SLOT_INDEX>;
+pub type SlotSize = SlotRanged<MAX_SLOT_SIZE>;
+pub type RawSlots = [Option<Slot>; SlotSize::MAX_USIZE];
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Slots(pub(super) [Option<Slot>; SlotSize::MAX_USIZE]);
+
+impl Slots {
+    pub fn as_slice(&self) -> &[Option<Slot>] {
+        &self.0[..]
+    }
+    pub fn as_mut_slice(&mut self) -> &mut [Option<Slot>] {
+        &mut self.0[..]
+    }
+    pub fn into_inner(self) -> [Option<Slot>; SlotSize::MAX_USIZE] {
+        self.0
+    }
+    pub fn valid_slots(&self) -> impl Iterator<Item = (SlotIndex, &Slot)> {
+        self.0
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| s.as_ref().map(|s| (SlotIndex::from(i), s)))
+    }
+}
+
+impl AsRef<[Option<Slot>]> for Slots {
+    fn as_ref(&self) -> &[Option<Slot>] {
+        &self.0[..]
+    }
+}
+
+impl AsMut<[Option<Slot>]> for Slots {
+    fn as_mut(&mut self) -> &mut [Option<Slot>] {
+        &mut self.0[..]
+    }
+}
+
+impl IntoIterator for Slots {
+    type Item = Option<Slot>;
+    type IntoIter = std::array::IntoIter<Option<Slot>, MAX_SLOT_SIZE>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+pub type MatchId = u64;
+pub type MatchInternalId = u32;
+
+#[derive(Debug)]
+pub struct Match<'a> {
+    pub(super) id: MatchId,
+    /// internal match id, appeared in invite link e.g. `osump://123456`
+    pub(super) internal_id: MatchInternalId,
+    pub(super) operator: Operator<'a>,
+}
+
+impl<'a> Match<'a> {
+    pub fn channel(&self) -> Channel {
+        Channel::Multiplayer(self.id)
+    }
+    pub fn id(&self) -> MatchId {
         self.id
     }
-    pub fn inner_id(&self) -> u32 {
-        self.inner_id
+    pub fn internal_id(&self) -> MatchInternalId {
+        self.internal_id
     }
-    pub async fn send_chat(&mut self, body: &str) -> crate::Result<()> {
-        self.writer.send_chat(body).await
+    pub fn invite_url(&self) -> String {
+        format!("osump://{}/", self.internal_id)
     }
-    pub async fn send_bot_command(
-        &mut self,
-        command: bot::Command,
-    ) -> crate::Result<bot::Response> {
-        self.writer.send_bot_command(command).await
+    pub fn invite_url_with_password(&self, password: impl AsRef<str>) -> String {
+        let mut url = self.invite_url();
+        url.push_str(password.as_ref());
+        url
     }
-    pub async fn send_unreliable_bot_command(
-        &mut self,
-        command: bot::Command,
-    ) -> crate::Result<()> {
-        self.writer.send_unreliable_bot_command(command).await
+    pub async fn send_bot_command<C: bot::Command>(
+        &self,
+        command: impl Borrow<C>,
+    ) -> StdResult<bot::Response<C>, super::OperatorError<super::Action>> {
+        self.operator
+            .send_bot_command(Some(self.channel()), command)
+            .await
     }
-    pub async fn settings(&mut self) -> crate::Result<MpSettingsResponse> {
-        Ok(self
-            .writer
-            .send_bot_command(bot::Command::Settings)
-            .await?
-            .settings()
-            .clone())
+    pub async fn send_chat(
+        &self,
+        content: impl AsRef<str>,
+    ) -> StdResult<(), super::OperatorError<super::Action>> {
+        self.operator
+            .send_channel_chat(self.channel(), content)
+            .await
     }
-    pub fn channel(&self) -> Channel {
-        self.writer.channel.clone()
+    pub async fn send_chats<S: AsRef<str>>(
+        &self,
+        contents: impl AsRef<[S]>,
+    ) -> StdResult<(), super::OperatorError<super::Action>> {
+        self.operator
+            .send_channel_chats(self.channel(), contents)
+            .await
     }
-    pub fn invite_link(&self, password: Option<&str>) -> String {
-        format!("osump://{}/{}", self.inner_id, password.unwrap_or(""))
-    }
-    pub fn events(&self) -> broadcast::Receiver<super::Event> {
-        self.event_rx.resubscribe()
-    }
-    pub async fn channel_writer(&self) -> &ChannelSender {
-        &self.writer
+    pub async fn operator(&self) -> &Operator {
+        &self.operator
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Slot {
-    pub(super) user: User,
-    pub(super) host: bool,
-    pub(super) status: SlotStatus,
-    pub(super) team: Option<Team>,
-    pub(super) mods: Mods,
+    pub(crate) user: User,
+    pub(crate) host: bool,
+    pub(crate) status: SlotStatus,
+    pub(crate) team: Option<Team>,
+    pub(crate) mods: Mods,
 }
 
 impl Slot {
@@ -87,8 +220,8 @@ impl Slot {
     pub fn status(&self) -> SlotStatus {
         self.status
     }
-    pub fn team(&self) -> Option<Team> {
-        self.team
+    pub fn team(&self) -> Option<&Team> {
+        self.team.as_ref()
     }
     pub fn mods(&self) -> Mods {
         self.mods
@@ -127,7 +260,15 @@ impl TryFrom<&str> for Team {
     }
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+impl FromStr for Team {
+    type Err = ConversionError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::try_from(s)
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum TeamMode {
     Individual,
     TagCoop,
@@ -162,6 +303,14 @@ impl TryFrom<&str> for TeamMode {
             "TagTeamVs" => Ok(TeamMode::TagTeam),
             _ => Err(ConversionError::InvalidTeamMode),
         }
+    }
+}
+
+impl FromStr for TeamMode {
+    type Err = ConversionError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::try_from(s)
     }
 }
 
@@ -204,6 +353,14 @@ impl TryFrom<&str> for ScoreMode {
     }
 }
 
+impl FromStr for ScoreMode {
+    type Err = ConversionError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::try_from(s)
+    }
+}
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum SlotStatus {
     NotReady,
@@ -242,6 +399,14 @@ impl TryFrom<&str> for SlotStatus {
     }
 }
 
+impl FromStr for SlotStatus {
+    type Err = ConversionError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::try_from(s)
+    }
+}
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum GameMode {
     Standard,
@@ -269,16 +434,46 @@ impl TryFrom<&str> for GameMode {
     }
 }
 
+impl FromStr for GameMode {
+    type Err = ConversionError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::try_from(s)
+    }
+}
+
 #[derive(Debug, Clone)]
-pub enum Event {
+pub struct Event {
+    pub(super) match_id: MatchId,
+    pub(super) match_internal_id: MatchInternalId,
+    pub(super) kind: EventKind,
+}
+
+impl Event {
+    pub fn match_id(&self) -> MatchId {
+        self.match_id
+    }
+    pub fn match_internal_id(&self) -> MatchInternalId {
+        self.match_internal_id
+    }
+    pub fn channel(&self) -> Channel {
+        Channel::Multiplayer(self.match_id)
+    }
+    pub fn kind(&self) -> &EventKind {
+        &self.kind
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum EventKind {
     PlayerJoined {
         user: User,
-        slot: usize,
+        slot: SlotIndex,
         team: Option<Team>,
     },
     PlayerMoved {
         user: User,
-        slot: usize,
+        slot: SlotIndex,
     },
     PlayerChangedTeam {
         user: User,
@@ -288,7 +483,7 @@ pub enum Event {
         user: User,
     },
     HostChanged {
-        host: User,
+        user: User,
     },
     HostChangingMap,
     MapChanged {
@@ -300,15 +495,45 @@ pub enum Event {
     MatchFinished,
     MatchPlayerScore {
         user: User,
-        score: u64,
+        score: UserScore,
         alive: bool,
     },
+    StartTimer {
+        time: Duration,
+    },
+    StartTimerEnd,
+    TimerTick {
+        time: Duration,
+    },
+    TimerEnd,
 }
 
-#[derive(Debug, Clone)]
-pub struct GameResult {
-    user: User,
-    score: u64,
-    /// game results "PASSED / FAILED"
-    alive: bool,
+impl EventKind {
+    pub(super) fn from_bot(kind: bot::MessageKind) -> Self {
+        match kind {
+            bot::MessageKind::EventPlayerJoined { user, slot, team } => {
+                Self::PlayerJoined { user, slot, team }
+            }
+            bot::MessageKind::EventPlayerMoved { user, slot } => Self::PlayerMoved { user, slot },
+            bot::MessageKind::EventPlayerTeam { user, team } => {
+                Self::PlayerChangedTeam { user, team }
+            }
+            bot::MessageKind::EventPlayerLeft { user } => Self::PlayerLeft { user },
+            bot::MessageKind::EventHostChanged { user } => Self::HostChanged { user },
+            bot::MessageKind::EventHostChangingMap => Self::HostChangingMap,
+            bot::MessageKind::EventMapChanged { map } => Self::MapChanged { map },
+            bot::MessageKind::EventPlayersReady => Self::PlayersReady,
+            bot::MessageKind::EventMatchStarted => Self::MatchStarted,
+            bot::MessageKind::MpAbortResponse => Self::MatchAborted,
+            bot::MessageKind::EventMatchFinished => Self::MatchFinished,
+            bot::MessageKind::EventMatchPlayerResult { user, score, alive } => {
+                Self::MatchPlayerScore { user, score, alive }
+            }
+            bot::MessageKind::EventStartTimer { time } => Self::StartTimer { time },
+            bot::MessageKind::EventStartTimerEndLuck => Self::StartTimerEnd,
+            bot::MessageKind::EventTimer { time } => Self::TimerTick { time },
+            bot::MessageKind::EventTimerEnd => Self::TimerEnd,
+            _ => unreachable!(),
+        }
+    }
 }

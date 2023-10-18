@@ -1,68 +1,70 @@
-use closur::bancho::{bot, multiplayer, Channel, Chat, Client, ClientOptions, Event};
+use closur::bancho::bot::command::{MpMake, MpPassword, MpSettings, MpStart};
+use closur::bancho::multiplayer;
+use closur::bancho::{ChatBuilder, Client, ClientOptionsBuilder, EventKind};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-// This example shows how to create a simple lobby bot.
+/// This example shows how to create a simple lobby bot.
 #[tokio::main]
 async fn main() -> Result<()> {
-    // "BANCHO_USERNAME" and "BANCHO_PASSWORD" are **compile-time** environment variables.
-    // You need to set username and password, e.g. running
-    // `BANCHO_USERNAME=username BANCHO_PASSWORD=password cargo run --example tbot`
-    let options = ClientOptions::default()
-        .username(env!("BANCHO_USERNAME").to_string())
-        .password(env!("BANCHO_PASSWORD").to_string());
+    let options = ClientOptionsBuilder::default()
+        .username(std::env::var("BANCHO_USERNAME").unwrap())
+        .password(std::env::var("BANCHO_PASSWORD").unwrap())
+        .build();
 
-    let mut client = Client::new(options).await?;
-    let mut writer = client.writer();
+    let client = Client::new(options).await?;
+    let operator = client.operator();
     client.auth().await?;
 
-    println!("[TBOT] Connected and authenticated, waiting for events...");
     let title = "TBOT LOBBY".to_string();
     let password = "tbot".to_string();
-    let response = writer
-        .send_private_bot_command(bot::Command::Make(title.clone()))
+    let response = operator
+        .send_bot_command(None, MpMake(title.clone()))
         .await?;
-    let response = response.make();
+    let match_id = response.body().unwrap().id();
 
-    let mut lobby = client.join_match(response.id()).await?;
-    lobby
-        .send_bot_command(bot::Command::Password(password.clone()))
-        .await?;
+    let lobby = operator.join_match(match_id).await?.unwrap();
+    println!("[TBOT] Create multiplayer game ID: {}", match_id);
+    lobby.send_bot_command(MpPassword(None)).await?;
     println!("[TBOT] Set lobby password to \"{}\"", password);
 
-    // This event subscriber will only receive events from the lobby.
-    let mut subscriber = lobby.events();
+    let mut subscriber = operator.subscribe();
     loop {
         let event = subscriber.recv().await?;
-        match event {
-            Event::Message { from, body, .. } => {
-                println!("[LOBBY] {}: {}", from.to_string(), body);
+        match event.kind() {
+            EventKind::Message(m) if event.relates_to_match(match_id) => {
+                println!("[LOBBY] {}: {}", m.user(), m.content());
+                let body = m.content();
                 if body.starts_with("!info") {
                     lobby.send_chat("TBOT from closur examples").await?;
                 } else if body.starts_with("!echo") {
                     let message = body.trim_start_matches("!echo").trim();
                     lobby.send_chat(message).await?;
                 } else if body.starts_with("!start") {
-                    lobby.send_bot_command(bot::Command::Start(None)).await?;
+                    lobby.send_bot_command(MpStart(None)).await?;
                 } else if body.starts_with("!invite") {
-                    let message = Chat::new("Join my multiplayer game: ")
-                        .append_link(title.as_str(), lobby.invite_link(None).as_str())
-                        .to_string();
-                    lobby.send_chat(message.as_str()).await?;
+                    lobby
+                        .send_chat(
+                            ChatBuilder::new()
+                                .push("Join my multiplayer game: ")
+                                .push_link(&title, lobby.invite_url())
+                                .chat(),
+                        )
+                        .await?;
                 } else if body.starts_with("!test") {
-                    // Fetch settings for current lobby
-                    let response = lobby.send_bot_command(bot::Command::Settings).await?;
-                    let settings = response.settings();
+                    let response = lobby.send_bot_command(MpSettings).await?;
+                    let settings = response.body().unwrap();
 
-                    let slots = settings.valid_slots();
-                    let with_highlight = slots
-                        .iter()
-                        .map(|x| x.user().name())
+                    let with_highlight = settings
+                        .slots()
+                        .valid_slots()
+                        .map(|(_, x)| x.user().name())
                         .collect::<Vec<_>>()
                         .join(", ");
-                    let without_highlight = slots
-                        .iter()
-                        .map(|x| x.user().name_without_highlight())
+                    let without_highlight = settings
+                        .slots()
+                        .valid_slots()
+                        .map(|(_, x)| x.user().name_without_highlight())
                         .collect::<Vec<_>>()
                         .join(", ");
 
@@ -76,18 +78,21 @@ async fn main() -> Result<()> {
                         .await?;
                 }
             }
-            Event::Multiplayer(_, event) => match event {
-                multiplayer::Event::PlayerJoined { user, .. } => {
-                    lobby
-                        .send_chat(
-                            format!("Hey, {}! This is TBOT lobby, have fun here.", user.name())
-                                .as_str(),
-                        )
-                        .await?;
+            EventKind::Multiplayer(e) if event.relates_to_match(match_id) => {
+                use multiplayer::EventKind;
+                match e.kind() {
+                    EventKind::PlayerJoined { user, .. } => {
+                        lobby
+                            .send_chat(format!(
+                                "Hey, {}! This is TBOT lobby, have fun here.",
+                                user.name()
+                            ))
+                            .await?;
+                    }
+                    _ => {}
                 }
-                _ => {}
-            },
-            Event::Part(_) => {
+            }
+            EventKind::Part(_) | EventKind::Closed => {
                 println!("See you next time.");
                 break;
             }
