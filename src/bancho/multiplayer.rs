@@ -444,6 +444,7 @@ impl FromStr for GameMode {
 
 #[derive(Debug, Clone)]
 pub struct Event {
+    pub(super) channel: Channel,
     pub(super) match_id: MatchId,
     pub(super) match_internal_id: MatchInternalId,
     pub(super) kind: EventKind,
@@ -456,8 +457,8 @@ impl Event {
     pub fn match_internal_id(&self) -> MatchInternalId {
         self.match_internal_id
     }
-    pub fn channel(&self) -> Channel {
-        Channel::Multiplayer(self.match_id)
+    pub fn channel(&self) -> &Channel {
+        &self.channel
     }
     pub fn kind(&self) -> &EventKind {
         &self.kind

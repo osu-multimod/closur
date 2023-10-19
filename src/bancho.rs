@@ -583,17 +583,32 @@ impl Event {
         self.time
     }
     pub fn relates_to_channel(&self, channel: &Channel) -> bool {
-        self.kind.relates_to_channel(channel)
+        self.channel() == Some(channel)
     }
     pub fn relates_to_match(&self, match_id: MatchId) -> bool {
-        self.kind.relates_to_match(match_id)
+        self.relates_to_channel(&Channel::Multiplayer(match_id))
+    }
+    pub fn channel(&self) -> Option<&Channel> {
+        match &self.kind {
+            EventKind::Join(c) | EventKind::Part(c) => Some(c),
+            EventKind::Message(m) => m.channel(),
+            EventKind::Bot(m) => m.channel(),
+            EventKind::Multiplayer(e) => Some(e.channel()),
+            _ => None,
+        }
+    }
+    pub fn user(&self) -> Option<&User> {
+        match &self.kind {
+            EventKind::Message(m) => Some(m.user()),
+            _ => None,
+        }
     }
 }
 
 impl From<Message> for Event {
     fn from(message: Message) -> Self {
         Event {
-            kind: message.into(),
+            kind: EventKind::Message(message),
             instant: Instant::now(),
             time: chrono::Utc::now(),
         }
@@ -603,7 +618,7 @@ impl From<Message> for Event {
 impl From<bot::Message> for Event {
     fn from(message: bot::Message) -> Self {
         Event {
-            kind: message.into(),
+            kind: EventKind::Bot(message),
             instant: Instant::now(),
             time: chrono::Utc::now(),
         }
@@ -613,7 +628,7 @@ impl From<bot::Message> for Event {
 impl From<multiplayer::Event> for Event {
     fn from(event: multiplayer::Event) -> Self {
         Event {
-            kind: event.into(),
+            kind: EventKind::Multiplayer(event),
             instant: Instant::now(),
             time: chrono::Utc::now(),
         }
@@ -645,39 +660,6 @@ pub enum EventKind {
 
     /// The peer connection is closed.
     Closed,
-}
-
-impl EventKind {
-    pub fn relates_to_channel(&self, channel: &Channel) -> bool {
-        match self {
-            EventKind::Join(c) | EventKind::Part(c) => c == channel,
-            EventKind::Message(m) => m.channel() == Some(channel),
-            EventKind::Bot(m) => m.channel() == Some(channel),
-            EventKind::Multiplayer(m) => &m.channel() == channel,
-            _ => false,
-        }
-    }
-    pub fn relates_to_match(&self, match_id: MatchId) -> bool {
-        self.relates_to_channel(&Channel::Multiplayer(match_id))
-    }
-}
-
-impl From<Message> for EventKind {
-    fn from(message: Message) -> Self {
-        EventKind::Message(message)
-    }
-}
-
-impl From<bot::Message> for EventKind {
-    fn from(message: bot::Message) -> Self {
-        EventKind::Bot(message)
-    }
-}
-
-impl From<multiplayer::Event> for EventKind {
-    fn from(event: multiplayer::Event) -> Self {
-        EventKind::Multiplayer(event)
-    }
 }
 
 struct Matcher {}
@@ -1232,7 +1214,7 @@ impl ClientActor {
                         }
                     }
 
-                    if bot_message.is_multiplayer_event() {
+                    if bot_message.is_multiplayer() {
                         if let Some(channel) = bot_message.channel() {
                             match channel {
                                 Channel::Multiplayer(match_id) => {
@@ -1243,6 +1225,7 @@ impl ClientActor {
                                     self.event_tx
                                         .send(
                                             multiplayer::Event {
+                                                channel: channel.clone(),
                                                 match_id: *match_id,
                                                 match_internal_id: state.match_internal_id.unwrap(),
                                                 kind,

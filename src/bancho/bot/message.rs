@@ -385,16 +385,69 @@ impl Message {
         &self.kind
     }
     pub fn is_stateful(&self) -> bool {
-        self.kind.is_stateful()
+        match self.kind {
+            MessageKind::StatsStatus { .. } => true,
+            MessageKind::StatsScore { .. } => true,
+            MessageKind::StatsPlayCount { .. } => true,
+            MessageKind::StatsAccuracy { .. } => true,
+
+            MessageKind::MpSettingsRoom { .. } => true,
+            MessageKind::MpSettingsMap { .. } => true,
+            MessageKind::MpSettingsTeamScoreModes { .. } => true,
+            MessageKind::MpSettingsMods { .. } => true,
+            MessageKind::MpSettingsSize { .. } => true,
+            MessageKind::MpSettingsSlot { .. } => true,
+
+            MessageKind::MpMapResponseMap { .. } => true,
+            MessageKind::MpMapResponseGameMode { .. } => true,
+
+            MessageKind::MpListRefsPrompt => true,
+            MessageKind::MpListRefsLineUser { .. } => true,
+
+            _ => false,
+        }
     }
-    pub fn is_multiplayer_event(&self) -> bool {
-        self.kind.is_multiplayer_event()
+    pub fn is_multiplayer(&self) -> bool {
+        match self.kind {
+            MessageKind::EventPlayerJoined { .. } => true,
+            MessageKind::EventPlayerMoved { .. } => true,
+            MessageKind::EventPlayerTeam { .. } => true,
+            MessageKind::EventPlayerLeft { .. } => true,
+            MessageKind::EventHostChanged { .. } => true,
+            MessageKind::EventHostChangingMap => true,
+            MessageKind::EventMapChanged { .. } => true,
+            MessageKind::EventPlayersReady => true,
+            MessageKind::EventMatchStarted => true,
+            MessageKind::EventMatchPlayerResult { .. } => true,
+
+            // This is not a an actual event, but a response to `!mp abort`.
+            // It is included here for convenience.
+            MessageKind::MpAbortResponse => true,
+
+            MessageKind::EventMatchFinished => true,
+            MessageKind::EventStartTimer { .. } => true,
+            MessageKind::EventStartTimerEndLuck => true,
+            MessageKind::EventTimer { .. } => true,
+            MessageKind::EventTimerEnd => true,
+            _ => false,
+        }
     }
     pub fn is_maintenance(&self) -> bool {
-        self.kind.is_maintenance_event()
+        match self.kind {
+            MessageKind::EventMaintenanceAlert => true,
+            MessageKind::EventMaintenanceTimer { .. } => true,
+            MessageKind::EventMaintenanceRightBack => true,
+            _ => false,
+        }
     }
     pub fn maintenance(&self) -> Option<Duration> {
-        self.kind.maintenance()
+        match self.kind {
+            // The first two events do not contain timer information.
+            MessageKind::EventMaintenanceAlert => None,
+            MessageKind::EventMaintenanceTimer { time } => Some(time.clone()),
+            MessageKind::EventMaintenanceRightBack => Some(Duration::ZERO),
+            _ => None,
+        }
     }
 }
 
@@ -790,74 +843,6 @@ pub enum MessageKind {
         time: Duration,
     },
     EventMaintenanceRightBack,
-}
-
-impl MessageKind {
-    pub fn is_stateful(&self) -> bool {
-        match self {
-            Self::StatsStatus { .. } => true,
-            Self::StatsScore { .. } => true,
-            Self::StatsPlayCount { .. } => true,
-            Self::StatsAccuracy { .. } => true,
-
-            Self::MpSettingsRoom { .. } => true,
-            Self::MpSettingsMap { .. } => true,
-            Self::MpSettingsTeamScoreModes { .. } => true,
-            Self::MpSettingsMods { .. } => true,
-            Self::MpSettingsSize { .. } => true,
-            Self::MpSettingsSlot { .. } => true,
-
-            Self::MpMapResponseMap { .. } => true,
-            Self::MpMapResponseGameMode { .. } => true,
-
-            Self::MpListRefsPrompt => true,
-            Self::MpListRefsLineUser { .. } => true,
-
-            _ => false,
-        }
-    }
-    pub fn is_multiplayer_event(&self) -> bool {
-        match self {
-            Self::EventPlayerJoined { .. } => true,
-            Self::EventPlayerMoved { .. } => true,
-            Self::EventPlayerTeam { .. } => true,
-            Self::EventPlayerLeft { .. } => true,
-            Self::EventHostChanged { .. } => true,
-            Self::EventHostChangingMap => true,
-            Self::EventMapChanged { .. } => true,
-            Self::EventPlayersReady => true,
-            Self::EventMatchStarted => true,
-            Self::EventMatchPlayerResult { .. } => true,
-
-            // This is not a an actual event, but a response to `!mp abort`.
-            // It is included here for convenience.
-            Self::MpAbortResponse => true,
-
-            Self::EventMatchFinished => true,
-            Self::EventStartTimer { .. } => true,
-            Self::EventStartTimerEndLuck => true,
-            Self::EventTimer { .. } => true,
-            Self::EventTimerEnd => true,
-            _ => false,
-        }
-    }
-    pub fn is_maintenance_event(&self) -> bool {
-        match self {
-            Self::EventMaintenanceAlert => true,
-            Self::EventMaintenanceTimer { .. } => true,
-            Self::EventMaintenanceRightBack => true,
-            _ => false,
-        }
-    }
-    pub fn maintenance(&self) -> Option<Duration> {
-        match self {
-            // The first two events do not contain timer information.
-            Self::EventMaintenanceAlert => None,
-            Self::EventMaintenanceTimer { time } => Some(time.clone()),
-            Self::EventMaintenanceRightBack => Some(Duration::ZERO),
-            _ => None,
-        }
-    }
 }
 
 /// This is a general matcher for a collection of regex patterns.
