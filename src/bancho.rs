@@ -7,7 +7,7 @@ use regex::Regex;
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tokio::time::{self, Duration, Instant};
+use tokio::time;
 
 use std::borrow::Borrow;
 use std::collections::{HashMap, VecDeque};
@@ -15,6 +15,7 @@ use std::fmt;
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use self::cache::UserCache;
 use self::irc::Transport;
@@ -1294,7 +1295,9 @@ impl ClientActor {
                     .await?;
             }
             irc::Command::PONG(..) => {
-                timeout.reset(Instant::now() + self.options.pinger_timeout);
+                timeout.reset(
+                    (Instant::now() + self.options.pinger_timeout).into()
+                );
             }
             irc::Command::PRIVMSG { target, body } => match prefix {
                 Some(prefix) => match prefix {
