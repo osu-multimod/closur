@@ -14,6 +14,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::pin::Pin;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use self::cache::UserCache;
 use self::irc::Transport;
@@ -45,8 +46,8 @@ pub trait IrcCommand {
 }
 
 #[derive(Debug)]
-pub struct IrcContext<'a> {
-    handle: &'a Client,
+pub struct IrcContext {
+    options: Arc<ClientOptions>,
     history: Vec<irc::Message>,
 }
 
@@ -61,15 +62,15 @@ impl<T: IrcCommand> IrcResponse<T> {
     }
 }
 
-impl<'a> IrcContext<'a> {
-    fn new(handle: &'a Client) -> Self {
+impl IrcContext {
+    fn new(options: Arc<ClientOptions>) -> Self {
         Self {
-            handle,
+            options,
             history: Vec::new(),
         }
     }
     pub fn options(&self) -> &ClientOptions {
-        &self.handle.options
+        &self.options
     }
     pub fn history(&self) -> &[irc::Message] {
         &self.history
@@ -712,6 +713,9 @@ pub struct ClientOptions {
 }
 
 impl ClientOptions {
+    pub fn builder() -> ClientOptionsBuilder {
+        ClientOptionsBuilder::new()
+    }
     pub fn endpoint(&self) -> &str {
         &self.endpoint
     }
@@ -799,14 +803,14 @@ impl ClientOptionsBuilder {
 }
 
 #[derive(Debug)]
-pub struct Operator<'a> {
-    handle: &'a Client,
+pub struct Operator {
+    options: Arc<ClientOptions>,
     tx: mpsc::Sender<Action>,
     rx: broadcast::Receiver<Event>,
     irc_rx: broadcast::Receiver<irc::Message>,
 }
 
-impl<'a> Operator<'a> {
+impl Operator {
     /// Sends a raw IRC command to the server.
     ///
     /// This method is unreliable, because it does not track the response. To
@@ -834,7 +838,7 @@ impl<'a> Operator<'a> {
             Some(command) => self.tx.send(Action::Raw(command)).await?,
             None => self.tx.send(Action::RawGroup(command.commands())).await?,
         };
-        let mut context = IrcContext::new(self.handle);
+        let mut context = IrcContext::new(self.options.clone());
 
         let mut skip_count: usize = 0;
 
@@ -857,8 +861,8 @@ impl<'a> Operator<'a> {
     async fn send_action(&self, action: Action) -> StdResult<(), OperatorError<Action>> {
         Ok(self.tx.send(action).await?)
     }
-    pub fn options(&'a self) -> &'a ClientOptions {
-        &self.handle.options
+    pub fn options(&self) -> &ClientOptions {
+        &self.options
     }
     /// Subscribes to the event stream.
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {
@@ -1144,7 +1148,7 @@ impl<'a> Operator<'a> {
         Ok(response.body().ok().map(|info| multiplayer::Match {
             id,
             internal_id: info.match_internal_id(),
-            operator: self.handle.operator(),
+            operator: self.clone(),
         }))
     }
     pub async fn has_joined(
@@ -1157,6 +1161,17 @@ impl<'a> Operator<'a> {
         let (tx, rx) = oneshot::channel();
         self.tx.send(Action::Channels(tx)).await?;
         rx.await.map_err(|_| OperatorError::Cancelled)
+    }
+}
+
+impl Clone for Operator {
+    fn clone(&self) -> Self {
+        Self {
+            options: self.options.clone(),
+            tx: self.tx.clone(),
+            rx: self.rx.resubscribe(),
+            irc_rx: self.irc_rx.resubscribe(),
+        }
     }
 }
 
@@ -1177,7 +1192,7 @@ struct ChannelState {
 }
 
 struct ClientActor {
-    options: ClientOptions,
+    options: Arc<ClientOptions>,
 
     assembler: bot::MessageAssembler,
     channels: HashMap<Channel, ChannelState>,
@@ -1430,18 +1445,25 @@ impl ClientActor {
 
 #[derive(Debug)]
 pub struct Client {
-    options: ClientOptions,
-    actor: JoinHandle<Result<()>>,
-    action_tx: mpsc::Sender<Action>,
-    event_rx: broadcast::Receiver<Event>,
-    irc_rx: broadcast::Receiver<irc::Message>,
+    options: Arc<ClientOptions>,
+    actor: Option<JoinHandle<Result<()>>>,
+    operator: Option<Operator>,
 }
 
 impl Client {
     const CHANNEL_BUFFER: usize = 2048;
     const CACHE_SIZE: usize = 2048;
-    pub async fn new(options: ClientOptions) -> Result<Self> {
-        let stream = TcpStream::connect(options.endpoint.clone()).await?;
+    pub fn new(options: ClientOptions) -> Self {
+        let options = Arc::new(options);
+
+        Self {
+            options,
+            actor: None,
+            operator: None,
+        }
+    }
+    pub async fn run(&mut self) -> Result<()> {
+        let stream = TcpStream::connect(self.options.endpoint.clone()).await?;
         let transport = Transport::new(stream);
 
         let (irc_tx, irc_rx) = broadcast::channel(Self::CHANNEL_BUFFER);
@@ -1453,7 +1475,7 @@ impl Client {
 
         let mut actor = ClientActor {
             assembler: bot::MessageAssembler::new(),
-            options: options.clone(),
+            options: self.options.clone(),
             channels: HashMap::new(),
             user_cache: UserCache::new(Self::CACHE_SIZE),
             transport,
@@ -1461,16 +1483,20 @@ impl Client {
             action_rx,
             irc_tx,
         };
-
-        let actor = tokio::spawn(async move { actor.run().await });
-
-        Ok(Self {
-            options,
-            actor,
-            action_tx: tx,
-            event_rx: rx,
+        self.actor = Some(tokio::spawn(async move { actor.run().await }));
+        self.operator = Some(Operator {
+            options: self.options.clone(),
+            tx,
+            rx,
             irc_rx,
-        })
+        });
+        Ok(())
+    }
+    pub fn new_operator(&self) -> Operator {
+        self.operator.as_ref().unwrap().clone()
+    }
+    pub fn operator(&self) -> &Operator {
+        self.operator.as_ref().unwrap()
     }
     pub async fn auth(&self) -> StdResult<(), Error> {
         let response = self
@@ -1489,16 +1515,12 @@ impl Client {
     pub fn options(&self) -> &ClientOptions {
         &self.options
     }
-    pub fn operator<'a>(&'a self) -> Operator<'a> {
-        Operator {
-            handle: &self,
-            tx: self.action_tx.clone(),
-            rx: self.event_rx.resubscribe(),
-            irc_rx: self.irc_rx.resubscribe(),
-        }
-    }
     pub async fn shutdown(self) -> Result<()> {
-        self.actor.await.unwrap()
+        if let Some(actor) = self.actor {
+            actor.await.unwrap()
+        } else {
+            Ok(())
+        }
     }
 }
 

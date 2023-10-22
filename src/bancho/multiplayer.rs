@@ -147,14 +147,14 @@ pub type MatchId = u64;
 pub type MatchInternalId = u32;
 
 #[derive(Debug)]
-pub struct Match<'a> {
+pub struct Match {
     pub(super) id: MatchId,
     /// internal match id, appeared in invite link e.g. `osump://123456`
     pub(super) internal_id: MatchInternalId,
-    pub(super) operator: Operator<'a>,
+    pub(super) operator: Operator,
 }
 
-impl<'a> Match<'a> {
+impl Match {
     pub fn channel(&self) -> Channel {
         Channel::Multiplayer(self.id)
     }
