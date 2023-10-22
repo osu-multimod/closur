@@ -12,9 +12,10 @@ async fn main() -> Result<()> {
         .password(std::env::var("BANCHO_PASSWORD").unwrap())
         .build();
 
-    let client = Client::new(options).await?;
-    let operator = client.operator();
+    let mut client = Client::new(options);
+    client.run().await?;
     client.auth().await?;
+    let operator = client.operator();
 
     let title = "TBOT LOBBY".to_string();
     let password = "tbot".to_string();
