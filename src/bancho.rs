@@ -575,6 +575,9 @@ pub struct Event {
 }
 
 impl Event {
+    pub fn into_inner(self) -> EventKind {
+        self.kind
+    }
     pub fn kind(&self) -> &EventKind {
         &self.kind
     }
@@ -1223,6 +1226,7 @@ impl ClientActor {
                     if let Some(terminated) = self.assembler.terminate(Some(&bot_message)) {
                         self.event_tx.send(terminated.into()).unwrap();
                     }
+                    println!("Bancho: {:?}", bot_message);
                     self.event_tx.send(bot_message.clone().into()).unwrap();
                     if bot_message.is_stateful() {
                         if let Some(tracked) = self.assembler.track(&bot_message) {
@@ -1295,9 +1299,7 @@ impl ClientActor {
                     .await?;
             }
             irc::Command::PONG(..) => {
-                timeout.reset(
-                    (Instant::now() + self.options.pinger_timeout).into()
-                );
+                timeout.reset((Instant::now() + self.options.pinger_timeout).into());
             }
             irc::Command::PRIVMSG { target, body } => match prefix {
                 Some(prefix) => match prefix {
