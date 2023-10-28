@@ -256,6 +256,7 @@ impl MessageAssembler {
                 if let MessageKind::StatsAccuracy { .. } = message.kind() {
                     let composed = Message::compose_stats(self.lines());
                     self.lines.clear();
+                    self.needs_termination = false;
                     Some(composed)
                 } else {
                     None
@@ -296,6 +297,7 @@ impl MessageAssembler {
                     if present == size.as_usize() {
                         let composed = Message::compose_mp_settings(self.lines());
                         self.lines.clear();
+                        self.needs_termination = false;
                         Some(composed)
                     } else {
                         None
@@ -316,6 +318,7 @@ impl MessageAssembler {
                 self.lines.push(message.clone());
                 let composed = Message::compose_mp_map(self.lines());
                 self.lines.clear();
+                self.needs_termination = false;
                 Some(composed)
             }
             (None, MessageKind::MpListRefsPrompt)
@@ -363,7 +366,7 @@ impl MessageAssembler {
                     self.needs_termination = false;
                     Some(composed)
                 }
-                _ => panic!("unexpected termination state"),
+                _ => panic!("unexpected termination state {:?}", self.lines),
             }
         } else {
             None
