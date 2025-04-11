@@ -761,7 +761,7 @@ impl Default for ClientOptions {
             operation_timeout: Duration::from_secs(3),
             pinger_interval: Duration::from_secs(15),
             pinger_timeout: Duration::from_secs(30),
-            message_tracker_limit: 48,
+            message_tracker_limit: 56,
         }
     }
 }
@@ -1623,10 +1623,9 @@ pub struct User {
 
 impl PartialEq for User {
     fn eq(&self, other: &Self) -> bool {
-        other
-            .id
-            .map(|other| self.eq(&other))
-            .unwrap_or(self.eq(&other.name()))
+        other.id.and_then(|id| self.id.map(|s| s == id)).unwrap_or(
+            self == &other.name.as_str()
+        )
     }
 }
 
@@ -2294,6 +2293,10 @@ mod tests {
     }
     #[test]
     fn user_partial_eq() {
+        assert_ne!(User::name_only("a"), User::name_only("b"));
         assert_eq!(User::id_only(1234), User::id_only(1234));
+        assert_ne!(User::id_only(1234), User::id_only(1235));
+        assert_eq!(User::new(1234, "abcd"), User::name_only("abcd"));
+        assert_eq!(User::name_only("abcd"), User::new(1234, "abcd"));
     }
 }
